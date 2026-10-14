@@ -1,0 +1,119 @@
+import { useTelemetry } from "@/hooks/useTelemetry.js";
+import { useAuth } from "@/hooks/useAuth.js";
+import { Permissions } from "@/auth/permissions.js";
+import { useFlyConfirmation } from "@/hooks/useFlyConfirmation.js";
+import { ConnectionState } from "@/services/telemetry/telemetryTypes.js";
+import { Lock } from "lucide-react";
+
+/**
+ * Interactive ARM / UNARMED Flight Safety Control Button with RBAC & Mandatory Confirmation
+ * 
+ * - When permitted (SUPER_ADMIN, FLIGHT_OPERATOR):
+ *   Requests explicit user confirmation (Confirm ARM / Confirm DISARM) before executing command.
+ * - When restricted (FLEET_MANAGER, VIEWER):
+ *   Inhibited with lock indicator and explanation tooltip.
+ */
+export const ArmStatusButton = () => {
+  const {
+    isArmed,
+    executeArmCommand,
+    showToast,
+    selectedDroneId,
+    telemetry,
+    connectionState,
+    isLive,
+    isStale,
+  } = useTelemetry();
+
+  const { hasPermission } = useAuth();
+  const { isConfirmOpen, requestActionConfirmation } = useFlyConfirmation();
+
+  const canExecuteFlight = hasPermission(Permissions.EXECUTE_FLIGHT_COMMANDS);
+  const displayedArmed = telemetry?.isLive && typeof telemetry?.armed === "boolean"
+    ? telemetry.armed
+    : isArmed;
+  const activeDroneId = selectedDroneId || telemetry?.droneId || "DRONE-001";
+
+  const handleActionRequest = () => {
+    // Section 20: Duplicate command protection
+    if (isConfirmOpen) return;
+
+    // 1. RBAC Pre-check (Section 21)
+    if (!canExecuteFlight) {
+      if (typeof showToast === "function") {
+        showToast("ARM/DISARM inhibited: Requires Flight Operator or Super Admin role.", "warning");
+      }
+      return;
+    }
+
+    const nextAction = displayedArmed ? "DISARM" : "ARM";
+
+    // Section 2, 3, 16: Do NOT block ARM/DISARM on client because of stale telemetry, GPS, or connection!
+    // Send confirmation and let backend response determine success/failure.
+    requestActionConfirmation({
+      action: nextAction,
+      title: nextAction === "ARM" ? "Confirm Arm" : "Confirm Disarm",
+      confirmLabel: nextAction === "ARM" ? "Confirm Arm" : "Confirm Disarm",
+      cancelLabel: "Cancel",
+      severity: nextAction === "ARM" ? "warning" : "danger",
+      droneId: activeDroneId,
+      currentState: displayedArmed ? "ARMED" : "UNARMED",
+      onCancel: () => {
+        // Mode change / action cancel: no command, no notification
+      },
+      onConfirm: async () => {
+        if (typeof executeArmCommand === "function") {
+          await executeArmCommand({ arm: !displayedArmed, droneId: activeDroneId });
+        }
+      },
+    });
+  };
+
+  if (!canExecuteFlight) {
+    return (
+      <button
+        type="button"
+        onClick={handleActionRequest}
+        className="inline-flex items-center gap-1.5 rounded-[4px] px-2 sm:px-2.5 py-1 border shrink-0 transition-all cursor-not-allowed select-none bg-[#161B22] border-[#2E3842] opacity-70"
+        title="ARM/DISARM Inhibited — Flight command permissions required"
+        aria-label="ARM/DISARM Inhibited for active role"
+      >
+        <Lock className="w-3 h-3 text-[#8E9EAA]" />
+          <span className="text-[10px] sm:text-[11px] font-semibold whitespace-nowrap font-mono tracking-wide text-[#8E9EAA]">
+            {displayedArmed ? "ARMED (LOCKED)" : "UNARMED"}
+        </span>
+      </button>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={handleActionRequest}
+      className={`inline-flex items-center gap-1.5 rounded-[4px] px-2 sm:px-2.5 py-1 border shrink-0 transition-all cursor-pointer select-none active:scale-95 ${
+        displayedArmed
+          ? "bg-[#5C1F1F] border-[#7A2B2B] hover:bg-[#6E2525] hover:border-[#943434] shadow-[0_0_8px_rgba(255,65,65,0.2)]"
+          : "bg-[#1B2836] border-[#2A3E52] hover:bg-[#223344] hover:border-[#3E556E]"
+      }`}
+        title={displayedArmed ? "Vehicle is ARMED — Click to DISARM" : "Vehicle is UNARMED — Click to ARM"}
+        aria-label={displayedArmed ? "Vehicle is Armed, click to disarm" : "Vehicle is Unarmed, click to arm"}
+    >
+      <div
+        className={`w-[6px] h-[6px] rounded-full shrink-0 transition-colors ${
+          displayedArmed
+            ? "bg-[#FF4141] shadow-[0px_0px_5px_0px_#FF4141]"
+            : "bg-[#8E9EAA]"
+        }`}
+      />
+      <span
+        className={`text-[10px] sm:text-[11px] font-semibold whitespace-nowrap font-mono tracking-wide ${
+          displayedArmed ? "text-[#FFB3B3]" : "text-[#8E9EAA]"
+        }`}
+        >
+          {displayedArmed ? "ARMED" : "UNARMED"}
+      </span>
+    </button>
+  );
+};
+
+export default ArmStatusButton;
