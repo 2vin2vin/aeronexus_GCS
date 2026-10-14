@@ -5,6 +5,9 @@ spring:
     consumer:
       auto-offset-reset: latest
 
+simulator:
+  enabled: ${SIMULATOR_ENABLED:false}
+
 logging:
   level:
     com.droneiq: DEBUG

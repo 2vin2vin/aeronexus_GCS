@@ -1,0 +1,20 @@
+# MediaMTX Configuration for DroneIQ Live Video Egress
+# Protocols: RTMP ingestion (:1935), RTSP (:8554), WebRTC/WHEP egress (:8889, :8189/udp)
+
+api: yes
+apiAddress: :9997
+
+rtmp: yes
+rtmpAddress: :1935
+
+rtsp: yes
+rtspAddress: :8554
+
+webrtc: yes
+webrtcAddress: :8889
+webrtcLocalUDPAddress: :8189
+webrtcAllowOrigins:
+  - '*'
+
+paths:
+  all_others:

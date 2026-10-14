@@ -1,6 +1,7 @@
 package com.droneiq.telemetry.websocket;
 
 import com.droneiq.telemetry.dto.TelemetryMessage;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,6 +30,8 @@ public class TelemetryWebSocketService {
 
     // session ID -> Boolean (true if subscribed to all drones)
     private final Map<String, Boolean> subscribeAllMap = new ConcurrentHashMap<>();
+
+    private final Map<String, JsonNode> latestWaypointMessages = new ConcurrentHashMap<>();
 
     public TelemetryWebSocketService(ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
@@ -78,12 +81,76 @@ public class TelemetryWebSocketService {
             Map<String, Object> payload = Map.of(
                     "type", "TELEMETRY",
                     "droneId", message.droneId(),
+                    "liveDroneConnected", true,
                     "data", message
             );
             String json = objectMapper.writeValueAsString(payload);
             TextMessage textMessage = new TextMessage(json);
 
-            for (Map.Entry<String, WebSocketSession> entry : authenticatedSessions.entrySet()) {
+            broadcastToDroneSubscribers(message.droneId(), textMessage);
+        } catch (Exception e) {
+            log.error("Failed to serialize telemetry message for WebSocket broadcast: {}", e.getMessage(), e);
+        }
+    }
+
+    public void broadcastWaypoints(String droneId, JsonNode waypointMessage) {
+        latestWaypointMessages.put(droneId, waypointMessage.deepCopy());
+        if (authenticatedSessions.isEmpty()) {
+            return;
+        }
+
+        try {
+            Map<String, Object> payload = Map.of(
+                    "type", "WAYPOINTS",
+                    "droneId", droneId,
+                    "data", waypointMessage
+            );
+            broadcastToDroneSubscribers(droneId, new TextMessage(objectMapper.writeValueAsString(payload)));
+        } catch (Exception e) {
+            log.error("Failed to serialize waypoint message for WebSocket broadcast: {}", e.getMessage(), e);
+        }
+    }
+
+    public void sendLatestWaypoints(WebSocketSession session) {
+        latestWaypointMessages.forEach((droneId, message) -> sendWaypointIfSubscribed(session, droneId, message));
+    }
+
+    public void sendLatestWaypoints(WebSocketSession session, String droneId) {
+        JsonNode message = latestWaypointMessages.get(droneId);
+        if (message != null) {
+            sendWaypointIfSubscribed(session, droneId, message);
+        }
+    }
+
+    private void sendWaypointIfSubscribed(WebSocketSession session, String droneId, JsonNode message) {
+        String sessionId = session.getId();
+        boolean shouldSend = Boolean.TRUE.equals(subscribeAllMap.get(sessionId));
+        if (!shouldSend) {
+            Set<String> subscriptions = sessionSubscriptions.getOrDefault(sessionId, Collections.emptySet());
+            shouldSend = subscriptions.contains(droneId);
+        }
+        if (!shouldSend || !session.isOpen()) {
+            return;
+        }
+
+        try {
+            Map<String, Object> payload = Map.of(
+                    "type", "WAYPOINTS",
+                    "droneId", droneId,
+                    "data", message
+            );
+            synchronized (session) {
+                if (session.isOpen()) {
+                    session.sendMessage(new TextMessage(objectMapper.writeValueAsString(payload)));
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Failed to replay waypoint mission to session {}: {}", sessionId, e.getMessage());
+        }
+    }
+
+    private void broadcastToDroneSubscribers(String droneId, TextMessage textMessage) {
+        for (Map.Entry<String, WebSocketSession> entry : authenticatedSessions.entrySet()) {
                 String sessionId = entry.getKey();
                 WebSocketSession session = entry.getValue();
 
@@ -94,7 +161,7 @@ public class TelemetryWebSocketService {
                 boolean shouldSend = Boolean.TRUE.equals(subscribeAllMap.get(sessionId));
                 if (!shouldSend) {
                     Set<String> subs = sessionSubscriptions.getOrDefault(sessionId, Collections.emptySet());
-                    shouldSend = subs.contains(message.droneId());
+                    shouldSend = subs.contains(droneId);
                 }
 
                 if (shouldSend) {
@@ -108,9 +175,6 @@ public class TelemetryWebSocketService {
                         log.warn("Failed to send telemetry to session {}: {}", sessionId, e.getMessage());
                     }
                 }
-            }
-        } catch (Exception e) {
-            log.error("Failed to serialize telemetry message for WebSocket broadcast: {}", e.getMessage());
         }
     }
 

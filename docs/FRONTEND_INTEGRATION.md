@@ -154,6 +154,7 @@ Browser / Frontend                           DroneIQ Backend
 {
   "type": "TELEMETRY",
   "droneId": "DRONE-001",
+  "liveDroneConnected": true,
   "data": {
     "droneId": "DRONE-001",
     "timestamp": "2026-09-09T10:30:15.123Z",

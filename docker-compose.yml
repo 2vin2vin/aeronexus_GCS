@@ -46,6 +46,18 @@ services:
       timeout: 10s
       retries: 5
 
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: droneiq-mediamtx
+    restart: unless-stopped
+    ports:
+      - "1935:1935"
+      - "8554:8554"
+      - "8889:8889"
+      - "8189:8189/udp"
+    volumes:
+      - ./docker/mediamtx/mediamtx.yml:/mediamtx.yml:ro
+
 volumes:
   postgres_data:
   kafka_data:

@@ -18,6 +18,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import com.droneiq.command.service.DroneCommandWebSocketService;
 
 @Component
 public class TelemetryWebSocketHandler extends TextWebSocketHandler {
@@ -29,6 +30,8 @@ public class TelemetryWebSocketHandler extends TextWebSocketHandler {
     private final TelemetryWebSocketService webSocketService;
     private final ObjectMapper objectMapper;
 
+    private final DroneCommandWebSocketService droneCommandWebSocketService;
+
     // Track sessions that have completed first-message auth
     private final Map<String, Boolean> authenticatedSessionMap = new ConcurrentHashMap<>();
     private final Map<String, ScheduledFuture<?>> authTimeoutTasks = new ConcurrentHashMap<>();
@@ -37,10 +40,12 @@ public class TelemetryWebSocketHandler extends TextWebSocketHandler {
     public TelemetryWebSocketHandler(
             JwtService jwtService,
             TelemetryWebSocketService webSocketService,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper,
+            DroneCommandWebSocketService droneCommandWebSocketService) {
         this.jwtService = jwtService;
         this.webSocketService = webSocketService;
         this.objectMapper = objectMapper;
+        this.droneCommandWebSocketService = droneCommandWebSocketService;
     }
 
     @Override
@@ -95,6 +100,7 @@ public class TelemetryWebSocketHandler extends TextWebSocketHandler {
                 if (droneId != null && !droneId.isBlank()) {
                     webSocketService.subscribe(session, droneId);
                     sendJson(session, Map.of("type", "SUBSCRIBED", "droneId", droneId));
+                    webSocketService.sendLatestWaypoints(session, droneId);
                 } else {
                     sendJson(session, Map.of("type", "ERROR", "message", "droneId is required for SUBSCRIBE"));
                 }
@@ -109,6 +115,61 @@ public class TelemetryWebSocketHandler extends TextWebSocketHandler {
             case "SUBSCRIBE_ALL" -> {
                 webSocketService.subscribeAll(session);
                 sendJson(session, Map.of("type", "SUBSCRIBED_ALL"));
+                webSocketService.sendLatestWaypoints(session);
+            }
+            case "REGISTER_DRONE" -> {
+                String droneId = jsonNode.has("droneId")
+                        ? jsonNode.get("droneId").asText()
+                        : null;
+
+                if (droneId == null || droneId.isBlank()) {
+                    sendJson(session, Map.of(
+                            "type", "ERROR",
+                            "message", "droneId is required for REGISTER_DRONE"
+                    ));
+                    return;
+                }
+
+                // Check that the authenticated user is allowed to register
+                // a command bridge. Adjust these role names to match your
+                // application's actual JWT role values.
+                Object roleAttribute = session.getAttributes().get("role");
+                String role = roleAttribute != null
+                        ? roleAttribute.toString()
+                        : "";
+
+                boolean authorized = switch (role.toUpperCase()) {
+                    case "ADMIN", "SUPER_ADMIN", "SUPERADMIN", "DRONE_BRIDGE" -> true;
+                    default -> false;
+                };
+
+                if (!authorized) {
+                    log.warn(
+                            "Unauthorized drone bridge registration: droneId={}, role={}",
+                            droneId,
+                            role
+                    );
+
+                    sendJson(session, Map.of(
+                            "type", "ERROR",
+                            "message", "Not authorized to register a drone bridge"
+                    ));
+                    return;
+                }
+
+                droneCommandWebSocketService.registerDrone(droneId, session);
+
+                log.info(
+                        "Drone bridge successfully registered: droneId={}, session={}",
+                        droneId,
+                        session.getId()
+                );
+
+                sendJson(session, Map.of(
+                        "type", "DRONE_REGISTERED",
+                        "droneId", droneId,
+                        "message", "Drone command bridge registered successfully"
+                ));
             }
             case "PING" -> sendJson(session, Map.of("type", "PONG"));
             default -> sendJson(session, Map.of("type", "UNKNOWN_TYPE", "requested", messageType));
@@ -144,6 +205,7 @@ public class TelemetryWebSocketHandler extends TextWebSocketHandler {
                     "accessLevel", "VIEWER".equalsIgnoreCase(role) ? "LIVE_VIEW_ONLY" : "FULL_ACCESS",
                     "message", "Authenticated successfully. Subscribed to all drone telemetry by default."
             ));
+                webSocketService.sendLatestWaypoints(session);
         } else {
             log.warn("WebSocket session {} failed authentication: invalid token", session.getId());
             sendJson(session, Map.of("type", "AUTH_FAILURE", "message", "Invalid or expired token"));
@@ -152,14 +214,30 @@ public class TelemetryWebSocketHandler extends TextWebSocketHandler {
     }
 
     @Override
-    public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
-        log.info("WebSocket connection closed: session={}, status={}", session.getId(), status);
+    public void afterConnectionClosed(
+            WebSocketSession session,
+            CloseStatus status) {
+
+        log.info(
+                "WebSocket connection closed: session={}, status={}",
+                session.getId(),
+                status
+        );
+
         authenticatedSessionMap.remove(session.getId());
-        ScheduledFuture<?> task = authTimeoutTasks.remove(session.getId());
+
+        ScheduledFuture<?> task =
+                authTimeoutTasks.remove(session.getId());
+
         if (task != null) {
             task.cancel(false);
         }
+
+        // Remove from telemetry subscriptions.
         webSocketService.unregisterSession(session);
+
+        // Remove from the flight-command bridge registry.
+        droneCommandWebSocketService.unregisterSession(session);
     }
 
     @Override

@@ -5,7 +5,7 @@ spring:
     active: ${SPRING_PROFILES_ACTIVE:dev}
 
   datasource:
-    url: ${SPRING_DATASOURCE_URL:${DB_URL:jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5433}/${DB_NAME:droneiq}}}
+    url: ${SPRING_DATASOURCE_URL:${DB_URL:jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:droneiq}}}
     username: ${SPRING_DATASOURCE_USERNAME:${DB_USER:droneiq}}
     password: ${SPRING_DATASOURCE_PASSWORD:${DB_PASSWORD:droneiq_password}}
     driver-class-name: org.postgresql.Driver
@@ -61,7 +61,7 @@ security:
     expiration-ms: ${JWT_EXPIRATION_MS:86400000} # 24 hours
 
 simulator:
-  enabled: ${SIMULATOR_ENABLED:true}
+  enabled: ${SIMULATOR_ENABLED:false}
   interval-ms: ${SIMULATOR_INTERVAL_MS:1000}
 
 storage:
@@ -86,3 +86,25 @@ springdoc:
     path: /v3/api-docs
   swagger-ui:
     path: /swagger-ui.html
+
+# Video Streaming Configuration (MediaMTX + WebRTC)
+droneiq:
+  video:
+    enabled: ${DRONEIQ_VIDEO_ENABLED:true}
+    media-server-url: ${DRONEIQ_VIDEO_MEDIA_SERVER_URL:http://localhost:8889}
+    rtmp-base-url: ${DRONEIQ_VIDEO_RTMP_BASE_URL:rtmp://localhost:1935}
+    default-stream-id: ${DRONEIQ_VIDEO_DEFAULT_STREAM_ID:drone-001-camera}
+    streams:
+      - stream-id: drone-001-camera
+        drone-id: DRONE-001
+        stream-name: "Drone 001 Camera"
+        protocol: WEBRTC
+        path: drone-001-camera
+        status: AVAILABLE
+      - stream-id: drone-002-camera
+        drone-id: DRONE-002
+        stream-name: "Drone 002 Camera"
+        protocol: WEBRTC
+        path: drone-002-camera
+        status: AVAILABLE
+

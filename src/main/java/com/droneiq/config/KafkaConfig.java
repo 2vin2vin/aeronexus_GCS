@@ -36,6 +36,9 @@ public class KafkaConfig {
     @Value("${app.kafka.telemetry-topic:drone.telemetry}")
     private String telemetryTopic;
 
+    @Value("${app.kafka.waypoints-topic:drone.waypoints}")
+    private String waypointsTopic;
+
     @Value("${spring.kafka.consumer.group-id:droneiq-telemetry-service}")
     private String consumerGroupId;
 
@@ -51,6 +54,19 @@ public class KafkaConfig {
                 .replicas(1)
                 .build();
     }
+
+        @Bean
+        @org.springframework.boot.autoconfigure.condition.ConditionalOnProperty(
+            name = "spring.kafka.admin.auto-create",
+            havingValue = "true",
+            matchIfMissing = true
+        )
+        public NewTopic waypointsTopic() {
+        return TopicBuilder.name(waypointsTopic)
+            .partitions(3)
+            .replicas(1)
+            .build();
+        }
 
     @Bean
     public ProducerFactory<String, TelemetryMessage> telemetryProducerFactory() {
@@ -86,6 +102,17 @@ public class KafkaConfig {
         return new DefaultKafkaConsumerFactory<>(props);
     }
 
+    @Bean
+    public ConsumerFactory<String, String> waypointConsumerFactory() {
+        Map<String, Object> props = new HashMap<>();
+        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, consumerGroupId + "-waypoints");
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        return new DefaultKafkaConsumerFactory<>(props);
+    }
+
     @Value("${spring.kafka.listener.auto-startup:true}")
     private boolean autoStartup;
 
@@ -94,6 +121,16 @@ public class KafkaConfig {
         ConcurrentKafkaListenerContainerFactory<String, TelemetryMessage> factory =
                 new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(telemetryConsumerFactory());
+        factory.setCommonErrorHandler(new DefaultErrorHandler(new FixedBackOff(1000L, 2)));
+        factory.setAutoStartup(autoStartup);
+        return factory;
+    }
+
+    @Bean
+    public ConcurrentKafkaListenerContainerFactory<String, String> waypointKafkaListenerContainerFactory() {
+        ConcurrentKafkaListenerContainerFactory<String, String> factory =
+                new ConcurrentKafkaListenerContainerFactory<>();
+        factory.setConsumerFactory(waypointConsumerFactory());
         factory.setCommonErrorHandler(new DefaultErrorHandler(new FixedBackOff(1000L, 2)));
         factory.setAutoStartup(autoStartup);
         return factory;

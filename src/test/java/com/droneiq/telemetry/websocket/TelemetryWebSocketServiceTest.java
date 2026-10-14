@@ -71,6 +71,7 @@ class TelemetryWebSocketServiceTest {
         verify(session1, times(1)).sendMessage(captor.capture());
         assertTrue(captor.getValue().getPayload().contains("DRONE-001"));
         assertTrue(captor.getValue().getPayload().contains("TELEMETRY"));
+        assertTrue(captor.getValue().getPayload().contains("\"liveDroneConnected\":true"));
     }
 
     @Test
