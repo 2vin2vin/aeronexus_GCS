@@ -142,6 +142,7 @@ class FlightControlService {
       method: "POST",
       body: JSON.stringify(payload),
     })
+    console.debug(`[FlightControlService] Sent flight command ${commandType} to ${endpoint}:`, payload, "Response:", response)
 
     try {
       telemetryClient.send({

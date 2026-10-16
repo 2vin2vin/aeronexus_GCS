@@ -578,6 +578,15 @@ def takeoff(altitude):
 
     A command ACK is not proof of reaching the target altitude.
     """
+    if isinstance(altitude, str):
+        altitude = (
+            altitude.strip()
+            .lower()
+            .removesuffix("metres")
+            .removesuffix("meters")
+            .removesuffix("m")
+            .strip()
+        )
     try:
         altitude = float(altitude)
     except (TypeError, ValueError):
@@ -616,6 +625,28 @@ def takeoff(altitude):
         "Continue monitoring altitude to verify completion."
     )
 
+def handle_set_mode(command_id, drone_id, parameters):
+    mode = str(parameters.get("mode", "")).upper().strip()
+
+    if not mode:
+        raise ValueError("Missing mode parameter.")
+
+    # Normalize common frontend naming differences.
+    mode_aliases = {
+        "POS_HOLD": "POSHOLD",
+    }
+    mode = mode_aliases.get(mode, mode)
+
+    # This requests the mode and waits for HEARTBEAT confirmation.
+    # It uses the existing global `mav` connection.
+    set_copter_mode(mode)
+
+    send_command_status(
+        command_id,
+        drone_id,
+        "MODE_CONFIRMED",
+        f"Flight mode {mode} confirmed by MAVLink heartbeat.",
+    )
 
 # ============================================================
 # LAND
@@ -646,6 +677,7 @@ ALLOWED_COMMANDS = {
     "DISARM",
     "TAKEOFF",
     "LAND",
+    "SET_MODE",
 }
 
 
@@ -753,8 +785,14 @@ def execute_command(message):
                 "Disarmed state confirmed by MAVLink heartbeat.",
             )
 
+        elif command_type == "SET_MODE":
+            handle_set_mode(command_id, drone_id, parameters)
+
         elif command_type == "TAKEOFF":
-            altitude = parameters.get("altitude", 5)
+            altitude = parameters.get(
+                "altitude",
+                parameters.get("targetAltitude", 5),
+            )
 
             takeoff(altitude)
 
@@ -917,7 +955,6 @@ def on_message(ws, message):
             "[WebSocket] Unhandled message type:",
             message_type,
         )
-
 
 def on_error(ws, error):
     print("[WebSocket] Error:", error)

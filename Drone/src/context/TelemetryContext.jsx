@@ -393,62 +393,56 @@ export const TelemetryProvider = ({ children }) => {
   }, [connectionState, lastTelemetryTime])
 
   // Centralized Flight Mode Switcher (USER ACTION ONLY)
-  const handleFlightModeChange = useCallback((newMode, source = "USER") => {
-    if (!newMode) return false
-    const normalized = String(newMode).toUpperCase().replace(/\s+/g, "_")
-    const validModes = ["STABILIZE", "ALT_HOLD", "POS_HOLD", "LOITER", "GUIDED", "RTL", "LAND", "AUTO", "BRAKE", "MANUAL"]
+  const handleFlightModeChange = useCallback(async (newMode, source = "USER") => {
+    if (!newMode) return false;
+
+    const normalized = String(newMode)
+      .toUpperCase()
+      .replace(/\s+/g, "_");
+
+    const validModes = [
+      "STABILIZE",
+      "ALT_HOLD",
+      "POSHOLD",
+      "LOITER",
+      "GUIDED",
+      "RTL",
+      "LAND",
+      "AUTO",
+      "BRAKE",
+      "MANUAL",
+    ];
+
     if (!validModes.includes(normalized)) {
-      console.warn(`[TelemetryContext] Unknown flight mode requested: ${newMode}`)
-      showAlert({
-        type: AlertTypes.ERROR,
-        title: "Flight Mode Change Failed",
-        message: "Unable to change flight mode.",
-        key: "FLIGHT_MODE_REJECTED",
-        category: AlertCategories.FLIGHT,
-      })
-      return false
+      showToast(`Unsupported flight mode: ${normalized}`, "error");
+      return false;
     }
 
-    const prevMode = flightMode
+    try {
+      await flightControlService.sendFlightCommand({
+        droneId: selectedDroneId,
+        commandType: "SET_MODE",
+        parameters: {
+          mode: normalized,
+        },
+      });
 
-    if (import.meta.env?.DEV) {
-      console.log(`[FLIGHT MODE] previous: ${flightMode} -> next: ${normalized} | source: ${source}`)
+      showToast(`Mode change to ${normalized} requested`, "info");
+
+      // Do not set flightModeState here.
+      // Update the actual mode when fresh vehicle telemetry reports it.
+      return true;
+    } catch (error) {
+      console.error("[FLIGHT MODE] Backend dispatch failed:", error);
+
+      showToast(
+        error?.message || `Could not request ${normalized} mode`,
+        "error"
+      );
+
+      return false;
     }
-
-    setFlightModeState(normalized)
-    setFleetTelemetry((prev) => ({
-      ...prev,
-      [selectedDroneId]: {
-        ...(prev[selectedDroneId] || {}),
-        flightMode: normalized,
-      },
-    }))
-
-    // Dispatch global custom event for drone simulation and UI components
-    window.dispatchEvent(new CustomEvent("aeronexus:flight-mode-change", {
-      detail: { mode: normalized, droneId: selectedDroneId, source },
-    }))
-
-    const friendlyLabels = {
-      STABILIZE: "Stabilize",
-      ALT_HOLD: "Alt Hold",
-      POS_HOLD: "Pos Hold",
-      LOITER: "Loiter",
-      GUIDED: "Guided",
-      RTL: "RTL",
-      LAND: "Land",
-      AUTO: "Auto",
-      BRAKE: "Brake",
-      MANUAL: "Manual",
-    }
-    const label = friendlyLabels[normalized] || normalized
-    const prevLabel = friendlyLabels[prevMode] || prevMode
-
-    // Section 10 & 13: Flight mode change notifications are ONLY dispatched by the user confirmation flow (FlightModeDropdown)
-    // External changes or internal updates update UI silently without notification
-
-    return true
-  }, [flightMode, selectedDroneId])
+  }, [selectedDroneId, showToast]);
 
   const setFlightMode = handleFlightModeChange
 
@@ -647,6 +641,30 @@ export const TelemetryProvider = ({ children }) => {
 
     return true
   }, [selectedDroneId, isAuthenticated, isArmed, isLive, fleetTelemetry, updateArmedState])
+
+  const executeFlightCommand = useCallback(async ({
+    commandType,
+    parameters = {},
+    isOverride = false,
+    droneId,
+  } = {}) => {
+    if (!commandType) {
+      throw new Error("Command type is required");
+    }
+
+    const targetDroneId = droneId || selectedDroneId;
+
+    if (!targetDroneId) {
+      throw new Error("Please select a drone");
+    }
+
+    return flightControlService.sendFlightCommand({
+      droneId: targetDroneId,
+      commandType,
+      parameters,
+      isOverride,
+    });
+  }, [selectedDroneId]);
 
   const toggleArmed = useCallback(async (source = "USER") => {
     try {
@@ -902,6 +920,9 @@ export const TelemetryProvider = ({ children }) => {
     dronePosition,
     liveTelemetryAttached,
     acceptLiveDronePosition,
+    executeArmCommand,
+    executeFlightCommand,
+    selectedDroneId,
     updateArmedState,
     positionSource: telemetry.positionSource,
     flightMode,
