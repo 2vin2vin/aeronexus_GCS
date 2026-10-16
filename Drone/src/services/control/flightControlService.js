@@ -144,19 +144,28 @@ class FlightControlService {
     })
     console.debug(`[FlightControlService] Sent flight command ${commandType} to ${endpoint}:`, payload, "Response:", response)
 
-    try {
-      telemetryClient.send({
-        type: "COMMAND",
-        commandType,
-        droneId,
-        parameters,
-        timestamp: payload.timestamp,
-      })
-    } catch {
-      // Safe ignore
-    }
+    // try {
+    //   telemetryClient.send({
+    //     type: "COMMAND",
+    //     commandType,
+    //     droneId,
+    //     parameters,
+    //     timestamp: payload.timestamp,
+    //   })
+    // } catch {
+    //   // Safe ignore
+    // }
 
     return response
+  }
+
+  async sendStartMissionCommand({ droneId = "DRONE-001" } = {}) {
+    return this.sendFlightCommand({
+      droneId,
+      commandType: "START_MISSION",
+      isOverride: false,
+      parameters: {},
+    });
   }
 
   /**

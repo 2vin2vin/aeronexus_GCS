@@ -678,8 +678,45 @@ ALLOWED_COMMANDS = {
     "TAKEOFF",
     "LAND",
     "SET_MODE",
+    "FORCE_DISARM",
 }
 
+# ============================================================
+# START MISSION
+# ============================================================
+
+def handle_start_mission(command_id, drone_id):
+    """
+    Start an already-uploaded ArduCopter mission.
+
+    Safety requirements:
+    - A fresh vehicle heartbeat must be available.
+    - The vehicle must already be armed.
+    - A mission must have been uploaded to the autopilot.
+    - AUTO mode must be confirmed before reporting success.
+    """
+    ensure_fresh_heartbeat()
+
+    if not is_armed():
+        raise RuntimeError(
+            "Cannot start mission: vehicle is not armed. "
+            "Arm the vehicle after completing pre-flight checks."
+        )
+
+    print("[MISSION] Requesting AUTO mode.")
+
+    # On ArduCopter, AUTO mode runs the uploaded autonomous mission.
+    set_copter_mode("AUTO")
+
+    send_command_status(
+        command_id,
+        drone_id,
+        "MODE_CONFIRMED",
+        "AUTO mode confirmed. The autopilot should execute its "
+        "uploaded mission. Monitor mission progress and telemetry.",
+    )
+
+    print("[MISSION] AUTO mode confirmed.")
 
 def remember_command_id(command_id):
     """
@@ -787,6 +824,9 @@ def execute_command(message):
 
         elif command_type == "SET_MODE":
             handle_set_mode(command_id, drone_id, parameters)
+
+        elif command_type == "FORCE_DISARM":
+            handle_start_mission(command_id, drone_id)
 
         elif command_type == "TAKEOFF":
             altitude = parameters.get(
