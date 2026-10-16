@@ -81,9 +81,17 @@ public class DroneCommandWebSocketService {
         );
         WebSocketSession session = droneSessions.get(droneId);
 
-        if (session == null || !session.isOpen()) {
+        if (session == null) {
             throw new IllegalStateException(
                     "No connected bridge for drone: " + droneId
+            );
+        }
+
+        if (!session.isOpen()) {
+            droneSessions.remove(droneId, session);
+
+            throw new IllegalStateException(
+                    "Bridge is disconnected for drone: " + droneId
             );
         }
 

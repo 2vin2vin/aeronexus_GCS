@@ -10,7 +10,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
-
 import java.util.Map;
 
 @Service
@@ -30,33 +29,30 @@ public class FlightCommandService {
         this.objectMapper = objectMapper;
     }
 
-    @Transactional
     public FlightCommandResponse executeRoutineCommand(
             FlightCommandRequest request,
             String pilotUsername
     ) {
         String droneId = request.droneId();
-        String commandType = request.commandType().toUpperCase();
 
-        // 1. Save the request as pending, NOT executed.
-        FlightCommand command = new FlightCommand(
-                droneId,
-                commandType,
-                false,
-                pilotUsername,
-                "PENDING",
-                request.getEffectivePayloadJson()
-        );
+        String commandType = request.commandType()
+                .trim()
+                .toUpperCase(java.util.Locale.ROOT);
 
-        FlightCommand saved = commandRepository.save(command);
-
-        // 2. Decode the optional command parameters.
+        // Validate and decode parameters before dispatch.
         Map<String, Object> parameters = parseParameters(
                 request.getEffectivePayloadJson()
         );
 
-        // 3. Dispatch to the bridge registered for this drone.
+        // 1. Persist the command as PENDING in its own transaction.
+        FlightCommand saved = createPendingCommand(
+                request,
+                pilotUsername,
+                commandType
+        );
+
         try {
+            // 2. Preserve the existing WebSocket command format.
             droneCommandWebSocketService.sendCommand(
                     droneId,
                     String.valueOf(saved.getId()),
@@ -64,19 +60,63 @@ public class FlightCommandService {
                     parameters
             );
 
-            // Update the database status to SENT here.
-            // Use your entity's status setter and repository save,
-            // or a repository update method, if available.
-            //
-            // Do not set EXECUTED here.
+            // 3. Mark SENT only after the WebSocket send succeeds.
+            return updateStatusAndGetResponse(
+                    saved.getId(),
+                    "SENT"
+            );
 
         } catch (RuntimeException ex) {
-            // Persist FAILED using your entity/repository's
-            // status-update mechanism, then propagate the error.
+
+            // A send exception can sometimes leave delivery uncertain.
+            // FAILED here means dispatch failed locally; it does not
+            // necessarily prove that the drone never received the command.
+            try {
+                updateStatusAndGetResponse(
+                        saved.getId(),
+                        "FAILED"
+                );
+            } catch (RuntimeException statusException) {
+                ex.addSuppressed(statusException);
+            }
+
             throw ex;
         }
+    }
 
-        return FlightCommandResponse.fromEntity(saved);
+    @Transactional
+    public FlightCommand createPendingCommand(
+            FlightCommandRequest request,
+            String username,
+            String commandType
+    ) {
+        FlightCommand command = new FlightCommand(
+                request.droneId(),
+                commandType,
+                false,
+                username,
+                "PENDING",
+                request.getEffectivePayloadJson()
+        );
+
+        return commandRepository.save(command);
+    }
+
+    @Transactional
+    public FlightCommandResponse updateStatusAndGetResponse(
+            Long commandId,
+            String status
+    ) {
+        FlightCommand command = commandRepository.findById(commandId)
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "Command not found: " + commandId
+                ));
+
+        command.setStatus(status);
+
+        FlightCommand updated = commandRepository.save(command);
+
+        return FlightCommandResponse.fromEntity(updated);
     }
 
     private Map<String, Object> parseParameters(String payloadJson) {
@@ -97,29 +137,37 @@ public class FlightCommandService {
         }
     }
 
-        @Transactional
-    public FlightCommandResponse executeOverrideCommand(FlightCommandRequest request, String managerUsername) {
+    @Transactional
+    public FlightCommandResponse executeOverrideCommand(
+            FlightCommandRequest request,
+            String managerUsername
+    ) {
         FlightCommand command = new FlightCommand(
                 request.droneId(),
-                request.commandType().toUpperCase(),
+                request.commandType()
+                        .trim()
+                        .toUpperCase(java.util.Locale.ROOT),
                 true,
                 managerUsername,
                 "OVERRIDE_EXECUTED",
                 request.getEffectivePayloadJson()
         );
+
         FlightCommand saved = commandRepository.save(command);
+
         return FlightCommandResponse.fromEntity(saved);
     }
 
     @Transactional(readOnly = true)
     public List<FlightCommandResponse> getCommandHistory(String droneId) {
-        List<FlightCommand> commands = (droneId != null && !droneId.isBlank())
-                ? commandRepository.findByDroneIdOrderByExecutedAtDesc(droneId)
-                : commandRepository.findAll();
+        List<FlightCommand> commands =
+                (droneId != null && !droneId.isBlank())
+                        ? commandRepository
+                                .findByDroneIdOrderByExecutedAtDesc(droneId)
+                        : commandRepository.findAll();
+
         return commands.stream()
                 .map(FlightCommandResponse::fromEntity)
                 .toList();
     }
 }
-
-
