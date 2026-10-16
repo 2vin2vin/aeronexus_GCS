@@ -142,20 +142,58 @@ public class FlightCommandService {
             FlightCommandRequest request,
             String managerUsername
     ) {
+        String droneId = request.droneId();
+
+        String commandType = request.commandType()
+                .trim()
+                .toUpperCase(java.util.Locale.ROOT);
+
+        // 1. Parse the command parameters before saving or dispatching.
+        Map<String, Object> parameters = parseParameters(
+                request.getEffectivePayloadJson()
+        );
+
+        // 2. Persist the override command as PENDING first.
         FlightCommand command = new FlightCommand(
-                request.droneId(),
-                request.commandType()
-                        .trim()
-                        .toUpperCase(java.util.Locale.ROOT),
+                droneId,
+                commandType,
                 true,
                 managerUsername,
-                "OVERRIDE_EXECUTED",
+                "PENDING",
                 request.getEffectivePayloadJson()
         );
 
         FlightCommand saved = commandRepository.save(command);
 
-        return FlightCommandResponse.fromEntity(saved);
+        try {
+            // 3. Forward the override command to the connected Python bridge.
+            droneCommandWebSocketService.sendCommand(
+                    droneId,
+                    String.valueOf(saved.getId()),
+                    commandType,
+                    parameters
+            );
+
+            // 4. SENT means dispatched, not necessarily executed by the drone.
+            saved.setStatus("SENT");
+
+            FlightCommand updated = commandRepository.save(saved);
+
+            return FlightCommandResponse.fromEntity(updated);
+
+        } catch (RuntimeException ex) {
+
+            // 5. Record a dispatch failure without losing the audit record.
+            // Delivery may be uncertain if the WebSocket failed mid-send.
+            try {
+                saved.setStatus("FAILED");
+                commandRepository.save(saved);
+            } catch (RuntimeException statusException) {
+                ex.addSuppressed(statusException);
+            }
+
+            throw ex;
+        }
     }
 
     @Transactional(readOnly = true)
