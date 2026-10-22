@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from kafka import KafkaProducer
 from pymavlink import mavutil
 
+import requests
 
 DRONE_ID = "DRONE-001"
 
@@ -232,6 +233,26 @@ def publish_waypoints():
 # Fetch and push waypoints immediately at startup
 # ---------------------------------------------------------------------------
 
+def post_request(data):
+    url = "https://lxkqnwwzlv7loncacthuxtk37y0iqkcq.lambda-url.us-east-1.on.aws/"
+
+    try:
+        response = requests.post(
+            url,
+            json=data,
+            timeout=5
+        )
+
+        response.raise_for_status()
+
+        print(f"POST Status: {response.status_code}")
+
+        return response.json()
+
+    except requests.exceptions.RequestException as e:
+        print(f"POST failed: {e}")
+        return None
+    
 print("Fetching initial waypoints...")
 
 publish_waypoints()
@@ -362,6 +383,8 @@ while True:
             "droneId": DRONE_ID,
 
             "timestamp": utc_timestamp(),
+            "data": "telemetry",
+            "telemetry": {
 
             "latitude": state["latitude"],
             "longitude": state["longitude"],
@@ -386,13 +409,46 @@ while True:
                 "systemId": master.target_system,
                 "componentId": master.target_component,
             },
+            }
         }
+
+        payload1 = {
+                    "droneId": DRONE_ID,
+        
+                    "timestamp": utc_timestamp(),
+        
+                    "latitude": state["latitude"],
+                    "longitude": state["longitude"],
+                    "altitude": state["altitude"],
+        
+                    "heading": state["heading"],
+                    "speed": state["speed"],
+        
+                    "roll": state["roll"],
+                    "pitch": state["pitch"],
+                    "yaw": state["yaw"],
+        
+                    "batteryPercentage": state["batteryPercentage"],
+                    "gpsSatellites": state["gpsSatellites"],
+        
+                    "flightMode": state["flightMode"],
+                    "armed": state["armed"],
+                    "status": state["status"],
+        
+                    "metadata": {
+                        "source": "pymavlink",
+                        "systemId": master.target_system,
+                        "componentId": master.target_component,
+                    },
+                }
 
         producer.send(
             TELEMETRY_TOPIC,
             key=DRONE_ID,
-            value=payload,
+            value=payload1,
         )
+
+        post_request(payload)  # Send POST request with telemetry data
 
         producer.flush()
 
@@ -415,3 +471,5 @@ while True:
             )
 
         last_waypoint_publish = now
+
+
