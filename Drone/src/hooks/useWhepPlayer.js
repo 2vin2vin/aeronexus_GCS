@@ -2,22 +2,29 @@ import { useState, useEffect, useRef, useCallback } from "react"
 
 const RETRY_DELAYS = [1000, 2000, 4000, 10000]
 const MAX_AUTO_RETRIES = 4
-const ICE_GATHERING_TIMEOUT_MS = 2500
 
 /**
- * Reusable WebRTC / WHEP Player Hook
- * Manages RTCPeerConnection lifecycle, SDP offer/answer negotiation with MediaMTX,
- * automatic bounded reconnect, and track binding to an HTML5 <video> element.
+ * WebSocket-based WebRTC player.
  *
- * @param {Object} options
- * @param {string|null} options.webrtcUrl - Full WHEP endpoint URL (e.g. "http://localhost:8889/drone-001-camera/whep")
- * @param {boolean} [options.enabled=true] - Toggle active playback
- * @param {Function} [options.onStatusChange] - Optional status change callback
- * @returns {Object} { videoRef, isPlaying, isLoading, error, connectionState, retry }
+ * Assumed signaling protocol:
+ *   Client -> { type: "join", room: "GCS" }
+ *   Client -> { type: "offer", room: "GCS", sdp: "..." }
+ *   Server -> { type: "answer", room: "GCS", sdp: "..." }
+ *   Both   -> { type: "candidate", room: "GCS", candidate: {...} }
+ *
+ * IMPORTANT:
+ * The join and SDP message formats above are assumptions.
+ * Adapt them to match your signaling server's actual protocol.
  */
-export function useWhepPlayer({ webrtcUrl, enabled = true, onStatusChange } = {}) {
+export function useWhepPlayer({
+  webrtcUrl,
+  enabled = true,
+  onStatusChange,
+  room = "GCS",
+} = {}) {
   const videoRef = useRef(null)
   const pcRef = useRef(null)
+  const wsRef = useRef(null)
   const retryTimeoutRef = useRef(null)
   const retryCountRef = useRef(0)
   const isUnmountedRef = useRef(false)
@@ -27,314 +34,439 @@ export function useWhepPlayer({ webrtcUrl, enabled = true, onStatusChange } = {}
   const [isPlaying, setIsPlaying] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState(null)
-  const [connectionState, setConnectionState] = useState("idle") // 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'failed' | 'offline'
+  const [connectionState, setConnectionState] = useState("idle")
 
   const updateState = useCallback(
-    (newState, err = null) => {
+    (state, err = null) => {
       if (isUnmountedRef.current) return
-      setConnectionState(newState)
-      if (err !== undefined) setError(err)
-      onStatusChange?.(newState, err)
+
+      setConnectionState(state)
+      setError(err)
+      onStatusChange?.(state, err)
     },
     [onStatusChange]
   )
 
-  /**
-   * Complete teardown of active WebRTC PeerConnection & video source
-   */
   const cleanup = useCallback(() => {
     if (retryTimeoutRef.current) {
       clearTimeout(retryTimeoutRef.current)
       retryTimeoutRef.current = null
     }
 
-    if (pcRef.current) {
-      try {
-        const pc = pcRef.current
-        pc.ontrack = null
-        pc.onicecandidate = null
-        pc.oniceconnectionstatechange = null
-        pc.onconnectionstatechange = null
-        pc.onicegatheringstatechange = null
-        pc.close()
-      } catch (err) {
-        if (import.meta.env?.DEV) {
-          console.debug("[WHEP] Error closing peer connection:", err)
-        }
+    const ws = wsRef.current
+    wsRef.current = null
+
+    if (ws) {
+      ws.onopen = null
+      ws.onmessage = null
+      ws.onerror = null
+      ws.onclose = null
+
+      if (
+        ws.readyState === WebSocket.CONNECTING ||
+        ws.readyState === WebSocket.OPEN
+      ) {
+        ws.close()
       }
-      pcRef.current = null
+    }
+
+    const pc = pcRef.current
+    pcRef.current = null
+
+    if (pc) {
+      pc.ontrack = null
+      pc.onicecandidate = null
+      pc.onconnectionstatechange = null
+      pc.oniceconnectionstatechange = null
+
+      try {
+        pc.close()
+      } catch {
+        // Ignore teardown errors.
+      }
     }
 
     if (videoRef.current) {
-      try {
-        videoRef.current.srcObject = null
-      } catch {
-        // Ignore
-      }
+      videoRef.current.srcObject = null
     }
 
     setIsPlaying(false)
   }, [])
 
-  /**
-   * Schedule bounded exponential backoff reconnect
-   */
   const scheduleReconnect = useCallback(
     (reason) => {
       cleanup()
 
-      if (isUnmountedRef.current || !enabled || !webrtcUrl) {
-        updateState("offline", null)
+      if (isUnmountedRef.current) return
+
+      if (!enabled || !webrtcUrl) {
+        updateState("offline")
+        setIsLoading(false)
         return
       }
 
-      if (retryCountRef.current < MAX_AUTO_RETRIES) {
-        const delay = RETRY_DELAYS[retryCountRef.current] || 10000
-        retryCountRef.current += 1
-
-        if (import.meta.env?.DEV) {
-          console.log(
-            `[WHEP] Connection disrupted (${reason}). Retrying in ${delay / 1000}s (attempt ${retryCountRef.current}/${MAX_AUTO_RETRIES})...`
-          )
-        }
-
-        updateState("reconnecting", "WebRTC connection lost. Retrying...")
-        setIsLoading(true)
-
-        retryTimeoutRef.current = setTimeout(() => {
-          if (!isUnmountedRef.current) {
-            connectRef.current?.()
-          }
-        }, delay)
-      } else {
-        if (import.meta.env?.DEV) {
-          console.warn("[WHEP] Max reconnect attempts reached. Switching to offline.")
-        }
+      if (retryCountRef.current >= MAX_AUTO_RETRIES) {
         updateState("offline", "Camera stream currently offline")
         setIsLoading(false)
+        return
       }
+
+      const delay = RETRY_DELAYS[retryCountRef.current] ?? 10000
+      retryCountRef.current += 1
+
+      if (import.meta.env?.DEV) {
+        console.warn(
+          `[WebRTC-WS] ${reason}. Retrying in ${delay}ms ` +
+          `(${retryCountRef.current}/${MAX_AUTO_RETRIES})`
+        )
+      }
+
+      updateState("reconnecting", "Connection lost. Retrying...")
+      setIsLoading(true)
+
+      retryTimeoutRef.current = setTimeout(() => {
+        if (!isUnmountedRef.current) {
+          connectRef.current?.()
+        }
+      }, delay)
     },
     [cleanup, enabled, webrtcUrl, updateState]
   )
 
-  /**
-   * Initiate WHEP WebRTC negotiation
-   */
   const connect = useCallback(async () => {
     cleanup()
 
-    // Yield to microtask so setState is not invoked synchronously within effect call
-    await Promise.resolve()
     if (isUnmountedRef.current) return
 
     if (!enabled || !webrtcUrl) {
-      updateState("idle", null)
+      updateState("idle")
       setIsLoading(false)
       return
     }
 
-    const negotiationId = ++activeNegotiationIdRef.current
+    const id = ++activeNegotiationIdRef.current
+
     setIsLoading(true)
-    setError(null)
     updateState("connecting")
 
-    if (typeof RTCPeerConnection === "undefined") {
-      updateState("failed", "WebRTC is not supported in this browser")
+    if (
+      typeof RTCPeerConnection === "undefined" ||
+      typeof WebSocket === "undefined"
+    ) {
+      updateState("failed", "WebRTC or WebSocket is not supported")
       setIsLoading(false)
       return
     }
+
+    let pc
 
     try {
       if (import.meta.env?.DEV) {
-        console.log(`[WHEP] [${negotiationId}] Creating peer connection for:`, webrtcUrl)
+        console.log(`[WebRTC-WS] [${id}] Connecting to ${webrtcUrl}`)
       }
 
-      const pc = new RTCPeerConnection({
+      const ws = new WebSocket(webrtcUrl)
+      wsRef.current = ws
+
+      pc = new RTCPeerConnection({
         iceServers: [
-          {
-            urls: "stun:stun.l.google.com:19302",
-          },
+          { urls: "stun:stun.l.google.com:19302" },
         ],
         bundlePolicy: "max-bundle",
       })
+
       pcRef.current = pc
 
-      // Add receiving video transceiver only
-      pc.addTransceiver("video", {
-        direction: "recvonly",
-      })
+      // Receive video from the remote peer.
+      pc.addTransceiver("video", { direction: "recvonly" })
 
-      // Track incoming video
-      pc.ontrack = (event) => {
-        if (activeNegotiationIdRef.current !== negotiationId) return
-        if (import.meta.env?.DEV) {
-          console.log(`[WHEP] [${negotiationId}] Video track received`)
+      // If the stream includes audio, this enables receiving it too.
+      pc.addTransceiver("audio", { direction: "recvonly" })
+
+      const isCurrent = () =>
+        !isUnmountedRef.current &&
+        activeNegotiationIdRef.current === id &&
+        pcRef.current === pc &&
+        wsRef.current === ws
+
+      const send = (message) => {
+        if (ws.readyState !== WebSocket.OPEN) {
+          console.warn("[WebRTC-WS] Cannot send: WebSocket is not open")
+          return
         }
 
-        if (event.streams && event.streams[0] && videoRef.current) {
-          videoRef.current.srcObject = event.streams[0]
-          setIsPlaying(true)
-          setIsLoading(false)
-          setError(null)
-          updateState("connected")
-          retryCountRef.current = 0 // Reset retry counter upon successful playback
-        }
+        ws.send(JSON.stringify({
+          room,
+          ...message,
+        }))
       }
 
-      // Monitor PeerConnection state
+      pc.ontrack = (event) => {
+        if (!isCurrent()) return
+
+        const video = videoRef.current
+        if (!video) return
+
+        const stream =
+          event.streams?.[0] ??
+          (() => {
+            const s = video.srcObject instanceof MediaStream
+              ? video.srcObject
+              : new MediaStream()
+
+            if (!s.getTracks().some((t) => t.id === event.track.id)) {
+              s.addTrack(event.track)
+            }
+
+            return s
+          })()
+
+        video.srcObject = stream
+        video.play().catch((err) => {
+          if (import.meta.env?.DEV) {
+            console.debug("[WebRTC-WS] Video autoplay blocked:", err)
+          }
+        })
+
+        setIsPlaying(true)
+        setIsLoading(false)
+        updateState("connected")
+        retryCountRef.current = 0
+      }
+
+      pc.onicecandidate = (event) => {
+        if (!isCurrent() || !event.candidate) return
+
+        // Matches the observed candidate message structure.
+        send({
+          type: "candidate",
+          candidate: event.candidate.toJSON(),
+        })
+      }
+
       pc.onconnectionstatechange = () => {
-        if (activeNegotiationIdRef.current !== negotiationId) return
+        if (!isCurrent()) return
+
         const state = pc.connectionState
+
         if (import.meta.env?.DEV) {
-          console.log(`[WHEP] [${negotiationId}] Connection state changed: ${state}`)
+          console.log(`[WebRTC-WS] [${id}] Connection: ${state}`)
         }
 
         if (state === "connected") {
           setIsLoading(false)
-          setError(null)
           updateState("connected")
           retryCountRef.current = 0
-        } else if (state === "failed") {
-          scheduleReconnect("peer connection failed")
-        } else if (state === "disconnected") {
-          scheduleReconnect("peer connection disconnected")
+        } else if (state === "failed" || state === "disconnected") {
+          scheduleReconnect(`Peer connection ${state}`)
         }
       }
 
-      // Monitor ICE connection state
       pc.oniceconnectionstatechange = () => {
-        if (activeNegotiationIdRef.current !== negotiationId) return
-        const iceState = pc.iceConnectionState
-        if (import.meta.env?.DEV) {
-          console.log(`[WHEP] [${negotiationId}] ICE connection state: ${iceState}`)
-        }
+        if (!isCurrent()) return
 
-        if (iceState === "failed") {
+        if (pc.iceConnectionState === "failed") {
           scheduleReconnect("ICE connection failed")
-        } else if (iceState === "disconnected") {
-          scheduleReconnect("ICE disconnected")
         }
       }
 
-      // Create and set local SDP offer
-      if (import.meta.env?.DEV) {
-        console.log(`[WHEP] [${negotiationId}] Creating SDP offer`)
-      }
-      const offer = await pc.createOffer()
-      await pc.setLocalDescription(offer)
+      ws.onopen = async () => {
+        if (!isCurrent()) return
 
-      // Wait for ICE gathering to complete with safe timeout
-      await new Promise((resolve) => {
-        if (pc.iceGatheringState === "complete") {
-          resolve()
-          return
+        try {
+          if (import.meta.env?.DEV) {
+            console.log(`[WebRTC-WS] [${id}] WebSocket connected`)
+          }
+
+          /*
+           * IMPORTANT:
+           * Confirm the required join message with your server.
+           * Some servers use "join", others use "subscribe",
+           * and some do not require a separate join message.
+           */
+          send({ type: "join" })
+
+          // Assumption: this server expects the viewer to create
+          // an offer. If it sends an offer instead, use the
+          // incoming-offer branch in ws.onmessage.
+          const offer = await pc.createOffer()
+
+          if (!isCurrent()) return
+
+          await pc.setLocalDescription(offer)
+
+          if (!isCurrent()) return
+
+          send({
+            type: "offer",
+            sdp: pc.localDescription.sdp,
+          })
+
+          if (import.meta.env?.DEV) {
+            console.log(`[WebRTC-WS] [${id}] SDP offer sent`)
+          }
+        } catch (err) {
+          if (!isCurrent()) return
+
+          console.error("[WebRTC-WS] Offer negotiation failed:", err)
+          scheduleReconnect("Offer negotiation failed")
         }
+      }
 
-        let resolved = false
-        const timer = setTimeout(() => {
-          if (!resolved) {
-            resolved = true
-            if (import.meta.env?.DEV) {
-              console.debug(`[WHEP] [${negotiationId}] ICE gathering timeout reached, proceeding`)
+      ws.onmessage = async (event) => {
+        if (!isCurrent()) return
+
+        try {
+          const message = JSON.parse(event.data)
+
+          if (import.meta.env?.DEV) {
+            console.log("[WebRTC-WS] Received:", message)
+          }
+
+          // Handle an SDP answer from the server.
+          if (message.type === "answer") {
+            const sdp =
+              typeof message.sdp === "string"
+                ? message.sdp
+                : message.sdp?.sdp
+
+            if (!sdp) {
+              throw new Error("Answer message has no SDP")
             }
-            resolve()
-          }
-        }, ICE_GATHERING_TIMEOUT_MS)
 
-        const handleIceState = () => {
-          if (pc.iceGatheringState === "complete" && !resolved) {
-            resolved = true
-            clearTimeout(timer)
-            pc.removeEventListener("icegatheringstatechange", handleIceState)
-            resolve()
+            await pc.setRemoteDescription({
+              type: "answer",
+              sdp,
+            })
+
+            return
           }
+
+          // Also support a server-initiated offer.
+          if (message.type === "offer") {
+            const sdp =
+              typeof message.sdp === "string"
+                ? message.sdp
+                : message.sdp?.sdp
+
+            if (!sdp) {
+              throw new Error("Offer message has no SDP")
+            }
+
+            await pc.setRemoteDescription({
+              type: "offer",
+              sdp,
+            })
+
+            const answer = await pc.createAnswer()
+            await pc.setLocalDescription(answer)
+
+            if (!isCurrent()) return
+
+            send({
+              type: "answer",
+              sdp: pc.localDescription.sdp,
+            })
+
+            return
+          }
+
+          // Handle ICE candidates received from the server.
+          if (message.type === "candidate") {
+            const candidate = message.candidate
+
+            // An empty candidate can indicate end-of-candidates.
+            if (!candidate || candidate === "") return
+
+            // Some protocols wrap the actual candidate in
+            // another "candidate" property.
+            const iceCandidate =
+              typeof candidate === "object" &&
+              candidate.candidate &&
+              typeof candidate.candidate === "object"
+                ? candidate.candidate
+                : candidate
+
+            if (
+              typeof iceCandidate === "object" &&
+              iceCandidate.candidate === ""
+            ) {
+              return
+            }
+
+            await pc.addIceCandidate(iceCandidate)
+          }
+        } catch (err) {
+          if (!isCurrent()) return
+
+          console.error("[WebRTC-WS] Signaling message failed:", err)
+          scheduleReconnect("Invalid signaling message")
         }
-        pc.addEventListener("icegatheringstatechange", handleIceState)
-      })
-
-      if (activeNegotiationIdRef.current !== negotiationId) return
-
-      // POST offer to WHEP endpoint
-      if (import.meta.env?.DEV) {
-        console.log(`[WHEP] [${negotiationId}] Sending SDP offer to: ${webrtcUrl}`)
       }
 
-      const response = await fetch(webrtcUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/sdp",
-        },
-        body: pc.localDescription?.sdp || offer.sdp,
-      })
+      ws.onerror = () => {
+        if (!isCurrent()) return
 
-      if (activeNegotiationIdRef.current !== negotiationId) return
-
-      if (!response.ok && response.status !== 201) {
-        throw new Error(`Media server returned HTTP ${response.status}`)
+        scheduleReconnect("WebSocket error")
       }
 
-      const answerSdp = await response.text()
-      if (import.meta.env?.DEV) {
-        console.log(`[WHEP] [${negotiationId}] SDP answer received`)
-      }
+      ws.onclose = () => {
+        if (!isCurrent()) return
 
-      if (!answerSdp || !answerSdp.includes("v=")) {
-        throw new Error("Invalid SDP answer received from media server")
-      }
-
-      await pc.setRemoteDescription({
-        type: "answer",
-        sdp: answerSdp,
-      })
-
-      if (import.meta.env?.DEV) {
-        console.log(`[WHEP] [${negotiationId}] Remote description set. Connection established`)
+        scheduleReconnect("WebSocket closed")
       }
     } catch (err) {
-      if (activeNegotiationIdRef.current !== negotiationId) return
+      if (activeNegotiationIdRef.current !== id) return
 
-      if (import.meta.env?.DEV) {
-        console.warn(`[WHEP] [${negotiationId}] WebRTC connection negotiation error:`, err.message)
-      }
-
-      // Do not expose raw technical stack traces to the user
-      scheduleReconnect("negotiation failed")
+      console.error("[WebRTC-WS] Connection setup failed:", err)
+      scheduleReconnect("Connection setup failed")
     }
-  }, [cleanup, enabled, webrtcUrl, updateState, scheduleReconnect])
+  }, [
+    cleanup,
+    enabled,
+    webrtcUrl,
+    room,
+    updateState,
+    scheduleReconnect,
+  ])
 
-  // Keep connectRef up to date
   useEffect(() => {
     connectRef.current = connect
   }, [connect])
 
-  /**
-   * Manual user retry action: resets counter and restarts connection immediately
-   */
   const retry = useCallback(() => {
     retryCountRef.current = 0
-    connect()
-  }, [connect])
+    connectRef.current?.()
+  }, [])
 
-  // Lifecycle: connect whenever webrtcUrl or enabled changes, clean up on unmount
   useEffect(() => {
     isUnmountedRef.current = false
     retryCountRef.current = 0
 
-    let timer = null
     if (enabled && webrtcUrl) {
-      timer = setTimeout(() => {
+      const timer = setTimeout(() => {
         if (!isUnmountedRef.current) {
-          connect()
+          connectRef.current?.()
         }
       }, 0)
+
+      return () => {
+        clearTimeout(timer)
+        isUnmountedRef.current = true
+        activeNegotiationIdRef.current += 1
+        cleanup()
+      }
     }
+
+    updateState("idle")
+    setIsLoading(false)
 
     return () => {
       isUnmountedRef.current = true
-      if (timer) clearTimeout(timer)
+      activeNegotiationIdRef.current += 1
       cleanup()
     }
-  }, [webrtcUrl, enabled, connect, cleanup])
+  }, [webrtcUrl, enabled, cleanup, updateState])
 
   return {
     videoRef,

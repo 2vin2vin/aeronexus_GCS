@@ -91,9 +91,11 @@ springdoc:
 droneiq:
   video:
     enabled: ${DRONEIQ_VIDEO_ENABLED:true}
-    media-server-url: ${DRONEIQ_VIDEO_MEDIA_SERVER_URL:http://localhost:8889}
+    # media-server-url: ${DRONEIQ_VIDEO_MEDIA_SERVER_URL:http://localhost:8889}
+    media-server-url: ${DRONEIQ_VIDEO_MEDIA_SERVER_URL:ws://35.183.17.145:8080} #http://localhost:8889}
     rtmp-base-url: ${DRONEIQ_VIDEO_RTMP_BASE_URL:rtmp://localhost:1935}
-    default-stream-id: ${DRONEIQ_VIDEO_DEFAULT_STREAM_ID:drone-001-camera}
+    # default-stream-id: ${DRONEIQ_VIDEO_DEFAULT_STREAM_ID:drone-001-camera}
+    default-stream-id: ${DRONEIQ_VIDEO_DEFAULT_STREAM_ID:GCS}
     streams:
       - stream-id: drone-001-camera
         drone-id: DRONE-001

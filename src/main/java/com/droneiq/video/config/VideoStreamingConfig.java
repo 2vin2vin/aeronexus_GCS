@@ -16,6 +16,17 @@ public class VideoStreamingConfig {
     private String defaultStreamId = "drone-001-camera";
     private List<StreamDefinition> streams = new ArrayList<>();
 
+    private String signalingServerUrl =
+        "ws://35.183.17.145:8080/";
+
+    public String getSignalingServerUrl() {
+        return signalingServerUrl;
+    }
+
+    public void setSignalingServerUrl(String signalingServerUrl) {
+        this.signalingServerUrl = signalingServerUrl;
+    }
+
     public static class StreamDefinition {
         private String streamId;
         private String droneId;
